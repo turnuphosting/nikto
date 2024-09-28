@@ -466,11 +466,11 @@ sub dump_target_info {
     if ($mark->{ssl}) {
 
         $sslprint = "$VARIABLES{'DIV'}\n";
-        $sslprint .= "+ SSL Info:        Subject:  $mark->{'ssl_cert_subject'}\n";
-        $sslprint .= "                   Altnames: $mark->{'ssl_cert_altnames'}\n"
+        $sslprint .= "+ SSL Info:           Subject:  $mark->{'ssl_cert_subject'}\n";
+        $sslprint .= "                      Altnames: $mark->{'ssl_cert_altnames'}\n"
           if $mark->{'ssl_cert_altnames'} ne '';
-        $sslprint .= "                   Ciphers:  $mark->{'ssl_cipher'}\n";
-        $sslprint .= "                   Issuer:   $mark->{'ssl_cert_issuer'}";
+        $sslprint .= "                      Ciphers:  $mark->{'ssl_cipher'}\n";
+        $sslprint .= "                      Issuer:   $mark->{'ssl_cert_issuer'}";
     }
 
     if ($CLI{'plugins'} ne '@@NONE') {
@@ -939,9 +939,9 @@ sub general_config {
     # SSL Test
     if (!LW2::ssl_is_available()) {
         nprint("- ***** TLS/SSL support not available (see docs for SSL install) *****");
-        if ($CLI{'ssl'}) {
+        if ($CLI{'ssl'} || ($CLI{'host'} =~ /^https/i)) {
             nprint("- ERROR: -ssl was specified but TLS/SSL is not available.");
-            exit;
+            exit 1;
         }
     }
 
@@ -1013,7 +1013,7 @@ sub safe_quit {
     report_summary($mark);
     report_close($mark);
     $NIKTO{'POSIX'}{'term'}->setlflag($NIKTO{'POSIX'}{'oterm'}) if ($^O !~ /MSWin32/);
-    exit(1);
+    exit 1;
 }
 
 ###############################################################################
@@ -1125,7 +1125,7 @@ sub resolve {
     {
         if ($CLI{'skiplookup'}) {
             nprint("+ ERROR: -nolookup set, but given name\n");
-            exit;
+            exit 1;
         }
 
         if ($LW2::LW2_CAN_IPv6) {    # IPv4/v6 resolve
@@ -1183,7 +1183,7 @@ sub resolve {
                     "+ ERROR: IPv4 scanning mode requested but only IPv6 addresses found ($ipcache)"
                     );
             }
-            exit;
+            exit 1;
         }
 
         if ($ipcache != "") {
@@ -1194,7 +1194,7 @@ sub resolve {
             && $ip !~ /^$LW2::IPv6_re$/) {
             nprint("+ ERROR: Invalid IP: $ip\n\n",
                    "", ($mark->{'hostname'}, $mark->{'ip'}, $mark->{'displayname'}));
-            exit;
+            exit 1;
         }
 
         $name = $ident;
@@ -1253,12 +1253,12 @@ sub set_targets {
         }
     }
 
-    # Now parse the list of checkhosts, store in %targs by host_port
-    my $targs = {};
+    # Now parse the list of checkhosts
     foreach my $host (@checkhosts) {
         $host =~ s/\s+//g;
         if ($host eq '') { next; }
-        my ($defhost, $defport) = '';
+        my $markhash = {};
+        $markhash->{'root'} = $root;
 
         # is it a URL?
         if ($host =~ /^https?:\/\//) {
@@ -1268,14 +1268,16 @@ sub set_targets {
                 exit 1;
             }
             my @hostdata = LW2::uri_split($host);
+            $markhash->{'ident'}               = $hostdata[2];
+            $markhash->{'port'}                = $hostdata[3];
+            if ($markhash->{'port'} eq '') {
+                if ($host =~ /^https:/) { $markhash->{'port'}=443; }
+                else { $markhash->{'port'}=$defaultport;}
+            }
 
-            $defhost                            = $hostdata[2];
-            $defport                            = $hostdata[3];
-            $targs{ $defhost . "_" . $defport } = ($root ne "") ? $root : '/';
-
-            if (($hostdata[0] ne '/') && ($hostdata[0] ne '') && ($root eq '')) {
+            if (($hostdata[0] ne '/') && ($hostdata[0] ne '') && ($markhash->{'root'} eq '')) {
                 $hostdata[0] =~ s/\/$//;
-                $targs{ $defhost . "_" . $defport } = $hostdata[0];
+                $markhash->{'root'} = $hostdata[0];
                 nprint("- Added -root value of '$hostdata[0]' from URI",
                        "v", ($mark->{'hostname'}, $mark->{'ip'}, $mark->{'displayname'}));
             }
@@ -1283,8 +1285,8 @@ sub set_targets {
         else {
             if ((index $host, '[') == 0) {    # looks like accepted IPv6 format
                 if ($host =~ /^(\[?$LW2::IPv6_re_inc_zoneid\]?)(?:[:](\d+))?$/) {
-                    $defhost = $1;
-                    $defport = $2;
+                    $markhash->{'ident'} = $1;
+                    $markhash->{'port'} = $2;
                 }
                 else {
                     nprint("- ERROR: Unrecognised target host format: $host",
@@ -1292,51 +1294,21 @@ sub set_targets {
                 }
             }
             else {
-                my @h = split(/\:|\,/, $host)
-                  ; # Q. Is host,port format ever going to reach here, or will the port be incorrectly split off earlier as another host
-                $defhost = $h[0];
-                $defport = $h[1];
-                if (scalar @h > 2) {    # Possible invalid IPv6 format has been supplied
+                my @h = split(/\:|\,/, $host);
+                if (scalar @h > 2 || $h[0] eq '') {    # Possible invalid IPv6 format has been supplied
                     nprint(
-                        "- ERROR: Target host '$host' contains more than one colon (:). If specifying an IPv6 target, use the [IPv6] format.",
-                        "",
+                        "- ERROR: Target host '$host' contains more than one colon (:). If specifying an IPv6 target, use the [IPv6] format.",                        "",
                         ($mark->{'hostname'}, $mark->{'ip'}, $mark->{'displayname'})
                         );
-
-                    # TODO skip this host if going through a file of targets
+                }
+                else {
+                $markhash->{'ident'} = $h[0];
+                $markhash->{'port'} = $h[1] || $defaultport;
                 }
             }
-            $targs{ $defhost . "_" . $defport } = ($root ne "") ? $root : '/';
+            $markhash->{'root'} = $root;
         }
-    }
-
-    foreach my $host (keys %targs) {
-        my ($h, $p) = split(/_/, $host);
-        if ($p eq '') {
-            foreach my $port (@ports) {
-                my $markhash = {};
-                if ($root ne '') {
-                    $markhash->{'root'} = $root;
-                    nprint("- Added -root value of '$root' from CLI", "v");
-                }
-
-                $markhash->{'ident'} = $h;
-                $markhash->{'port'}  = $port;
-                if ($targs{$host} ne '/') { $markhash->{'root'} = $targs{$host}; }
-                nprint("- Target:$markhash->{'ident'} port:$markhash->{'port'}",
-                       "v",
-                       ($markhash->{'hostname'}, $markhash->{'ip'}, $markhash->{'displayname'}));
-                push(@marks, $markhash);
-            }
-        }
-        else {
-            my $markhash = {};
-            if ($targs{$host} ne '/') { $markhash->{'root'} = $targs{$host}; }
-
-            $markhash->{'ident'} = $h;
-            $markhash->{'port'}  = $p;
-            push(@marks, $markhash);
-        }
+    push(@marks, $markhash);
     }
 
     return @marks;
@@ -2843,7 +2815,7 @@ sub version {
     # Check dependencies
     check_modules();
 
-    exit;
+    exit 0;
 }
 
 #######################################################################
@@ -2938,8 +2910,6 @@ sub send_updates {
 
 #######################################################################
 sub usage {
-    my $is_failure = shift;
-
     print "
    Options:
        -ask+               Whether to ask about submitting updates
@@ -3039,7 +3009,7 @@ sub usage {
 
     check_modules();
 
-    exit $is_failure;
+    exit 0;
 }
 
 #######################################################################
@@ -3190,7 +3160,7 @@ sub list_plugins {
         }
     }
 
-    exit(0);
+    exit 0;
 }
 
 ###############################################################################
